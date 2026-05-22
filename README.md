@@ -5,8 +5,9 @@
 ## Quick Run (รันจากเซิร์ฟเวอร์ไหนก็ได้ ไม่ต้อง clone)
 
 ```bash
-GH_TOKEN=ghp_xxxxx bash <(curl -fsSL https://raw.githubusercontent.com/AnonymousVS/Spaceship-Bulk-NS-Change/main/bulk-ns-change.sh)
+https://keep.google.com/u/1/#NOTE/1adxiw9AupKucOa6tXzaf5jlYEULEkAJL7lLAj8kXeyq8cY-aZE39NumA-_pM6Ho
 ```
+
 
 Script จะดึง config + domains จาก GitHub อัตโนมัติ ไม่ทิ้งไฟล์ค้างบนเซิร์ฟเวอร์
 
