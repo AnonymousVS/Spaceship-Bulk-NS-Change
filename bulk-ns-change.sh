@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # ============================================================
 # Spaceship Bulk NS Change
-# Version: 1.1.0
+# Version: 2.0.0
 # Repo: AnonymousVS/Spaceship-Bulk-NS-Change
 # Description: เปลี่ยน Nameservers ของโดเมนใน Spaceship
 #              แบบ Bulk ผ่าน API โดยไม่ต้องเข้าหน้าเว็บ
+#              รองรับ CSV: Domain,Nameserver1,Nameserver2
 # ============================================================
 
 set -euo pipefail
 
-VERSION="1.1.1"
+VERSION="2.0.1"
 TIMESTAMP="$(TZ='Asia/Bangkok' date '+%Y-%m-%d_%H-%M-%S')"
 
 # ── GitHub Raw URLs ──
@@ -31,6 +32,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 # ============================================================
@@ -100,33 +102,65 @@ load_config_from_github() {
     api_conf=$(fetch_github "${PRIVATE_REPO}/${PRIVATE_CONF}" "spaceship-api.conf (private)" "$GH_TOKEN")
     eval "$api_conf"
 
-    # 2) Fetch public config (NS, delay, Telegram)
+    # 2) Fetch public config (delay, Telegram)
     local pub_conf
     pub_conf=$(fetch_github "${PUBLIC_REPO}/config.conf" "config.conf (public)" "")
     eval "$pub_conf"
 
-    # 3) Fetch domains list
-    local domains_raw
-    domains_raw=$(fetch_github "${PUBLIC_REPO}/domains.txt" "domains.txt (public)" "")
-    echo "$domains_raw" > "${WORK_DIR}/domains.txt"
+    # 3) Fetch domains CSV
+    local csv_raw
+    csv_raw=$(fetch_github "${PUBLIC_REPO}/domains.csv" "domains.csv (public)" "")
+    echo "$csv_raw" > "${WORK_DIR}/domains.csv"
 
     # Validate required fields
     [[ -z "${SPACESHIP_API_KEY:-}" ]]    && die "SPACESHIP_API_KEY is empty in spaceship-api.conf"
     [[ -z "${SPACESHIP_API_SECRET:-}" ]] && die "SPACESHIP_API_SECRET is empty in spaceship-api.conf"
-    [[ -z "${NS1:-}" ]]                  && die "NS1 is empty in config.conf"
-    [[ -z "${NS2:-}" ]]                  && die "NS2 is empty in config.conf"
 
-    # Defaults
-    DELAY="${DELAY:-2}"
+    # Defaults (DELAY in milliseconds)
+    DELAY_MS="${DELAY_MS:-500}"
     TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
     TG_CHAT_ID="${TG_CHAT_ID:-}"
 
     echo -e "${GREEN}  ✅ Config loaded successfully${NC}\n"
 }
 
+# ── Parse CSV → arrays ──
+parse_csv() {
+    local csv_file="${WORK_DIR}/domains.csv"
+
+    DOMAINS=()
+    NS1_LIST=()
+    NS2_LIST=()
+
+    while IFS=',' read -r domain ns1 ns2 _rest; do
+        # ลบ spaces, \r, quotes
+        domain=$(echo "$domain" | tr -d ' \r"')
+        ns1=$(echo "$ns1" | tr -d ' \r"')
+        ns2=$(echo "$ns2" | tr -d ' \r"')
+
+        # ข้ามบรรทัดว่าง, comment, header
+        [[ -z "$domain" ]] && continue
+        [[ "$domain" == \#* ]] && continue
+        [[ "${domain,,}" == "domain" ]] && continue
+
+        # Validate
+        if [[ -z "$ns1" || -z "$ns2" ]]; then
+            echo -e "${YELLOW}  ⚠️  Skip: ${domain} — NS1 or NS2 is empty${NC}"
+            log "SKIP: ${domain} — missing NS"
+            continue
+        fi
+
+        DOMAINS+=("$domain")
+        NS1_LIST+=("$ns1")
+        NS2_LIST+=("$ns2")
+    done < "$csv_file"
+}
+
 # ── Spaceship API: Update Nameservers ──
 update_ns() {
     local domain="$1"
+    local ns1="$2"
+    local ns2="$3"
     local response
 
     response=$(curl -s -w "\n%{http_code}" \
@@ -134,7 +168,7 @@ update_ns() {
         -H "X-Api-Key: ${SPACESHIP_API_KEY}" \
         -H "X-Api-Secret: ${SPACESHIP_API_SECRET}" \
         -H "Content-Type: application/json" \
-        -d "{\"provider\":\"custom\",\"hosts\":[\"${NS1}\",\"${NS2}\"]}" \
+        -d "{\"provider\":\"custom\",\"hosts\":[\"${ns1}\",\"${ns2}\"]}" \
         --connect-timeout 10 \
         --max-time 30 \
         2>&1) || true
@@ -160,19 +194,19 @@ send_telegram() {
     fi
 }
 
-# ── Smart Delay ──
+# ── Smart Delay (milliseconds) ──
 smart_delay() {
     local attempt="$1"
-    local base_delay="${DELAY}"
 
     if [[ "$attempt" -gt 0 ]]; then
-        local backoff=$(( base_delay * (2 ** attempt) ))
-        [[ "$backoff" -gt 60 ]] && backoff=60
-        echo -e "${YELLOW}  ⏳ Rate limited — waiting ${backoff}s (retry ${attempt}/3)${NC}"
-        log "Rate limited — backoff ${backoff}s (retry ${attempt}/3)"
-        sleep "$backoff"
+        local backoff_ms=$(( DELAY_MS * (2 ** attempt) ))
+        [[ "$backoff_ms" -gt 60000 ]] && backoff_ms=60000
+        local backoff_sec=$(awk "BEGIN{printf \"%.1f\", ${backoff_ms}/1000}")
+        echo -e "${YELLOW}  ⏳ Rate limited — waiting ${backoff_ms}ms (retry ${attempt}/3)${NC}"
+        log "Rate limited — backoff ${backoff_ms}ms (retry ${attempt}/3)"
+        sleep "$backoff_sec"
     else
-        sleep "$base_delay"
+        sleep "$(awk "BEGIN{printf \"%.3f\", ${DELAY_MS}/1000}")"
     fi
 }
 
@@ -185,25 +219,22 @@ main() {
     check_dependencies
     load_config_from_github
 
-    # ── Read domains ──
-    local input_file="${WORK_DIR}/domains.txt"
-    mapfile -t domains < <(grep -v '^\s*$' "$input_file" | grep -v '^\s*#' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    local total=${#domains[@]}
+    # ── Parse CSV ──
+    parse_csv
+    local total=${#DOMAINS[@]}
 
     if [[ "$total" -eq 0 ]]; then
-        die "No domains found in domains.txt"
+        die "No domains found in domains.csv"
     fi
 
     # ── แสดงรายชื่อโดเมนทั้งหมด ──
-    echo -e "NS1:     ${CYAN}${NS1}${NC}"
-    echo -e "NS2:     ${CYAN}${NS2}${NC}"
-    echo -e "Delay:   ${CYAN}${DELAY}s${NC}"
+    echo -e "Delay: ${CYAN}${DELAY_MS}ms${NC}"
     echo ""
-    echo -e "── Domains (${CYAN}${total}${NC} total) ──────────────────────"
-    for i in "${!domains[@]}"; do
-        printf "  ${CYAN}%3d${NC}. %s\n" "$((i + 1))" "${domains[$i]}"
+    printf "${BOLD}  %-4s %-30s %-35s %-35s${NC}\n" "#" "Domain" "NS1" "NS2"
+    echo -e "  ──── ────────────────────────────── ─────────────────────────────────── ───────────────────────────────────"
+    for i in "${!DOMAINS[@]}"; do
+        printf "  ${CYAN}%-4d${NC} %-30s %-35s %-35s\n" "$((i + 1))" "${DOMAINS[$i]}" "${NS1_LIST[$i]}" "${NS2_LIST[$i]}"
     done
-    echo -e "──────────────────────────────────────────────"
     echo ""
 
     # ── Confirm ──
@@ -216,14 +247,16 @@ main() {
     echo ""
 
     log "=== Spaceship Bulk NS Change v${VERSION} ==="
-    log "Server: $(hostname) | Domains: ${total} | NS: ${NS1}, ${NS2} | Delay: ${DELAY}s"
+    log "Server: $(hostname) | Domains: ${total} | Delay: ${DELAY_MS}ms"
 
     local success=0
     local failed=0
     local failed_list=""
 
-    for i in "${!domains[@]}"; do
-        local domain="${domains[$i]}"
+    for i in "${!DOMAINS[@]}"; do
+        local domain="${DOMAINS[$i]}"
+        local ns1="${NS1_LIST[$i]}"
+        local ns2="${NS2_LIST[$i]}"
         local num=$((i + 1))
         local retry=0
         local max_retry=3
@@ -235,14 +268,14 @@ main() {
             fi
 
             local result
-            result=$(update_ns "$domain")
+            result=$(update_ns "$domain" "$ns1" "$ns2")
             local code="${result%%|*}"
             local body="${result#*|}"
 
             case "$code" in
                 200|204)
-                    echo -e "[${num}/${total}] ${GREEN}✅ ${domain}${NC} → OK"
-                    log "OK: ${domain} (HTTP ${code})"
+                    echo -e "[${num}/${total}] ${GREEN}✅ ${domain}${NC} → ${ns1}, ${ns2}"
+                    log "OK: ${domain} → ${ns1}, ${ns2} (HTTP ${code})"
                     ((success++))
                     done_flag=1
                     ;;
@@ -272,7 +305,7 @@ main() {
 
         # Normal delay between domains (skip after last one)
         if [[ "$done_flag" -eq 1 && "$num" -lt "$total" ]]; then
-            sleep "$DELAY"
+            sleep "$(awk "BEGIN{printf \"%.3f\", ${DELAY_MS}/1000}")"
         fi
     done
 
@@ -293,12 +326,11 @@ main() {
     fi
 
     # ── Telegram ──
-    local tg_msg="<b>🚀 Spaceship Bulk NS Change</b>
+    local tg_msg="<b>🚀 Spaceship Bulk NS Change v${VERSION}</b>
 <b>Server:</b> $(hostname)
 <b>Total:</b> ${total}
 <b>✅ Success:</b> ${success}
-<b>❌ Failed:</b> ${failed}
-<b>NS:</b> ${NS1}, ${NS2}"
+<b>❌ Failed:</b> ${failed}"
 
     if [[ "$failed" -gt 0 ]]; then
         tg_msg+="\n\n<b>Failed:</b>\n$(echo -e "$failed_list")"
