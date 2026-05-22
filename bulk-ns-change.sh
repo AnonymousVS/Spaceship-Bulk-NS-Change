@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="2.0.1"
+VERSION="2.0.2"
 TIMESTAMP="$(TZ='Asia/Bangkok' date '+%Y-%m-%d_%H-%M-%S')"
 
 # ── GitHub Raw URLs ──
@@ -100,12 +100,14 @@ load_config_from_github() {
 
     local api_conf
     api_conf=$(fetch_github "${PRIVATE_REPO}/${PRIVATE_CONF}" "spaceship-api.conf (private)" "$GH_TOKEN")
-    eval "$api_conf"
+    echo "$api_conf" > "${WORK_DIR}/spaceship-api.conf"
+    source "${WORK_DIR}/spaceship-api.conf"
 
     # 2) Fetch public config (delay, Telegram)
     local pub_conf
     pub_conf=$(fetch_github "${PUBLIC_REPO}/config.conf" "config.conf (public)" "")
-    eval "$pub_conf"
+    echo "$pub_conf" > "${WORK_DIR}/config.conf"
+    source "${WORK_DIR}/config.conf"
 
     # 3) Fetch domains CSV
     local csv_raw
