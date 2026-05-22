@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 TIMESTAMP="$(TZ='Asia/Bangkok' date '+%Y-%m-%d_%H-%M-%S')"
 
 # ── GitHub Raw URLs ──
@@ -194,10 +194,25 @@ main() {
         die "No domains found in domains.txt"
     fi
 
-    echo -e "Domains: ${CYAN}${total}${NC}"
+    # ── แสดงรายชื่อโดเมนทั้งหมด ──
     echo -e "NS1:     ${CYAN}${NS1}${NC}"
     echo -e "NS2:     ${CYAN}${NS2}${NC}"
     echo -e "Delay:   ${CYAN}${DELAY}s${NC}"
+    echo ""
+    echo -e "── Domains (${CYAN}${total}${NC} total) ──────────────────────"
+    for i in "${!domains[@]}"; do
+        printf "  ${CYAN}%3d${NC}. %s\n" "$((i + 1))" "${domains[$i]}"
+    done
+    echo -e "──────────────────────────────────────────────"
+    echo ""
+
+    # ── Confirm ──
+    echo -ne "${YELLOW}เปลี่ยน NS ทั้ง ${total} โดเมนนี้? (y/n): ${NC}"
+    read -r confirm </dev/tty
+    if [[ "${confirm,,}" != "y" ]]; then
+        echo -e "${RED}Cancelled.${NC}"
+        exit 0
+    fi
     echo ""
 
     log "=== Spaceship Bulk NS Change v${VERSION} ==="
