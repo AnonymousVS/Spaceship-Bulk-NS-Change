@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="2.0.2"
+VERSION="2.0.3"
 TIMESTAMP="$(TZ='Asia/Bangkok' date '+%Y-%m-%d_%H-%M-%S')"
 
 # ── GitHub Raw URLs ──
@@ -74,7 +74,7 @@ fetch_github() {
     local auth_header="${3:-}"
     local content
 
-    echo -e "  📥 Fetching ${desc}..."
+    echo -e "  📥 Fetching ${desc}..." >&2
 
     if [[ -n "$auth_header" ]]; then
         content=$(curl -fsSL -H "Authorization: token ${auth_header}" "$url" 2>/dev/null) || {
