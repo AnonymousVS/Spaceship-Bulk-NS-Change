@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="2.0.3"
+VERSION="2.0.5"
 TIMESTAMP="$(TZ='Asia/Bangkok' date '+%Y-%m-%d_%H-%M-%S')"
 
 # ── GitHub Raw URLs ──
@@ -242,7 +242,9 @@ main() {
     # ── Confirm ──
     echo -ne "${YELLOW}เปลี่ยน NS ทั้ง ${total} โดเมนนี้? (y/n): ${NC}"
     read -r confirm </dev/tty
-    if [[ "${confirm,,}" != "y" ]]; then
+    # ตัด whitespace + รับทั้ง y, Y, ั (ภาษาไทยตำแหน่งปุ่ม y)
+    confirm=$(echo "$confirm" | tr -d '[:space:]')
+    if [[ "$confirm" != "y" && "$confirm" != "Y" && "$confirm" != "ั" ]]; then
         echo -e "${RED}Cancelled.${NC}"
         exit 0
     fi
@@ -278,18 +280,18 @@ main() {
                 200|204)
                     echo -e "[${num}/${total}] ${GREEN}✅ ${domain}${NC} → ${ns1}, ${ns2}"
                     log "OK: ${domain} → ${ns1}, ${ns2} (HTTP ${code})"
-                    ((success++))
+                    ((success++)) || true
                     done_flag=1
                     ;;
                 429)
                     if [[ "$retry" -ge "$max_retry" ]]; then
                         echo -e "[${num}/${total}] ${RED}❌ ${domain}${NC} → FAILED (429 rate limited after ${max_retry} retries)"
                         log "FAILED: ${domain} (429 rate limited after ${max_retry} retries)"
-                        ((failed++))
+                        ((failed++)) || true
                         failed_list+="${domain}\n"
                         done_flag=1
                     fi
-                    ((retry++))
+                    ((retry++)) || true
                     ;;
                 *)
                     local err_msg
@@ -298,7 +300,7 @@ main() {
 
                     echo -e "[${num}/${total}] ${RED}❌ ${domain}${NC} → FAILED (${err_msg})"
                     log "FAILED: ${domain} (HTTP ${code}: ${err_msg})"
-                    ((failed++))
+                    ((failed++)) || true
                     failed_list+="${domain}\n"
                     done_flag=1
                     ;;
