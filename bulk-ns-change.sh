@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # Spaceship Bulk NS Change
-# Version: 1.0.0
+# Version: 1.1.0
 # Repo: AnonymousVS/Spaceship-Bulk-NS-Change
 # Description: เปลี่ยน Nameservers ของโดเมนใน Spaceship
 #              แบบ Bulk ผ่าน API โดยไม่ต้องเข้าหน้าเว็บ
@@ -9,15 +9,22 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF_FILE="${SCRIPT_DIR}/config.conf"
+VERSION="1.1.0"
 TIMESTAMP="$(TZ='Asia/Bangkok' date '+%Y-%m-%d_%H-%M-%S')"
-LOG_DIR="${SCRIPT_DIR}/logs"
-LOG_FILE="${LOG_DIR}/bulk-ns-change_${TIMESTAMP}.log"
+
+# ── GitHub Raw URLs ──
+GITHUB_RAW="https://raw.githubusercontent.com/AnonymousVS"
+PUBLIC_REPO="${GITHUB_RAW}/Spaceship-Bulk-NS-Change/main"
+PRIVATE_REPO="${GITHUB_RAW}/config/main"
+PRIVATE_CONF="spaceship-api.conf"
 
 # ── Spaceship API ──
 API_BASE="https://spaceship.dev/api/v1"
+
+# ── Temp directory (ไม่ทิ้งไฟล์ค้างบนเซิร์ฟเวอร์) ──
+WORK_DIR=$(mktemp -d "/tmp/spaceship-bulk-ns-XXXXXX")
+LOG_FILE="${WORK_DIR}/bulk-ns-change_${TIMESTAMP}.log"
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 # ── Colors ──
 RED='\033[0;31m'
@@ -46,7 +53,7 @@ log() {
 
 die() {
     echo -e "${RED}[ERROR] $1${NC}" >&2
-    log "ERROR: $1"
+    [[ -f "$LOG_FILE" ]] && log "ERROR: $1"
     exit 1
 }
 
@@ -58,16 +65,54 @@ check_dependencies() {
     done
 }
 
-load_config() {
-    if [[ ! -f "$CONF_FILE" ]]; then
-        die "Config file not found: ${CONF_FILE}\nCopy config.conf.example → config.conf and fill in your credentials."
+# ── Fetch file from GitHub ──
+fetch_github() {
+    local url="$1"
+    local desc="$2"
+    local auth_header="${3:-}"
+    local content
+
+    echo -e "  📥 Fetching ${desc}..."
+
+    if [[ -n "$auth_header" ]]; then
+        content=$(curl -fsSL -H "Authorization: token ${auth_header}" "$url" 2>/dev/null) || {
+            die "Failed to fetch ${desc} from ${url}\n  → Check GitHub Token and repo access."
+        }
+    else
+        content=$(curl -fsSL "$url" 2>/dev/null) || {
+            die "Failed to fetch ${desc} from ${url}"
+        }
     fi
-    # shellcheck source=/dev/null
-    source "$CONF_FILE"
+
+    echo "$content"
+}
+
+# ── Load config from GitHub repos ──
+load_config_from_github() {
+    echo -e "${CYAN}── Loading config from GitHub ──${NC}"
+
+    # 1) Fetch private config (API credentials) — requires GH_TOKEN
+    if [[ -z "${GH_TOKEN:-}" ]]; then
+        die "GH_TOKEN is not set.\nUsage: GH_TOKEN=ghp_xxxxx bash <(curl ...)"
+    fi
+
+    local api_conf
+    api_conf=$(fetch_github "${PRIVATE_REPO}/${PRIVATE_CONF}" "spaceship-api.conf (private)" "$GH_TOKEN")
+    eval "$api_conf"
+
+    # 2) Fetch public config (NS, delay, Telegram)
+    local pub_conf
+    pub_conf=$(fetch_github "${PUBLIC_REPO}/config.conf" "config.conf (public)" "")
+    eval "$pub_conf"
+
+    # 3) Fetch domains list
+    local domains_raw
+    domains_raw=$(fetch_github "${PUBLIC_REPO}/domains.txt" "domains.txt (public)" "")
+    echo "$domains_raw" > "${WORK_DIR}/domains.txt"
 
     # Validate required fields
-    [[ -z "${SPACESHIP_API_KEY:-}" ]]    && die "SPACESHIP_API_KEY is empty in config.conf"
-    [[ -z "${SPACESHIP_API_SECRET:-}" ]] && die "SPACESHIP_API_SECRET is empty in config.conf"
+    [[ -z "${SPACESHIP_API_KEY:-}" ]]    && die "SPACESHIP_API_KEY is empty in spaceship-api.conf"
+    [[ -z "${SPACESHIP_API_SECRET:-}" ]] && die "SPACESHIP_API_SECRET is empty in spaceship-api.conf"
     [[ -z "${NS1:-}" ]]                  && die "NS1 is empty in config.conf"
     [[ -z "${NS2:-}" ]]                  && die "NS2 is empty in config.conf"
 
@@ -75,12 +120,14 @@ load_config() {
     DELAY="${DELAY:-2}"
     TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
     TG_CHAT_ID="${TG_CHAT_ID:-}"
+
+    echo -e "${GREEN}  ✅ Config loaded successfully${NC}\n"
 }
 
 # ── Spaceship API: Update Nameservers ──
 update_ns() {
     local domain="$1"
-    local http_code body response
+    local response
 
     response=$(curl -s -w "\n%{http_code}" \
         -X PUT "${API_BASE}/domains/${domain}/nameservers" \
@@ -92,6 +139,7 @@ update_ns() {
         --max-time 30 \
         2>&1) || true
 
+    local http_code body
     http_code=$(echo "$response" | tail -1)
     body=$(echo "$response" | sed '$d')
 
@@ -113,14 +161,11 @@ send_telegram() {
 }
 
 # ── Smart Delay ──
-# Spaceship rate limit: 5 req/domain/300s (ไม่มีปัญหาเพราะยิงโดเมนละ 1 ครั้ง)
-# Global rate limit: ใช้ DELAY ป้องกัน + เพิ่ม delay ถ้าโดน 429
 smart_delay() {
     local attempt="$1"
     local base_delay="${DELAY}"
 
     if [[ "$attempt" -gt 0 ]]; then
-        # Exponential backoff: 5s, 10s, 20s
         local backoff=$(( base_delay * (2 ** attempt) ))
         [[ "$backoff" -gt 60 ]] && backoff=60
         echo -e "${YELLOW}  ⏳ Rate limited — waiting ${backoff}s (retry ${attempt}/3)${NC}"
@@ -138,37 +183,25 @@ smart_delay() {
 main() {
     print_banner
     check_dependencies
-    load_config
+    load_config_from_github
 
-    # ── Input file ──
-    local input_file="${1:-}"
-    if [[ -z "$input_file" ]]; then
-        die "Usage: ./bulk-ns-change.sh <domains.txt>"
-    fi
-    if [[ ! -f "$input_file" ]]; then
-        die "File not found: ${input_file}"
-    fi
-
-    # ── Prepare ──
-    mkdir -p "$LOG_DIR"
-
-    # Read domains (skip empty lines and comments)
+    # ── Read domains ──
+    local input_file="${WORK_DIR}/domains.txt"
     mapfile -t domains < <(grep -v '^\s*$' "$input_file" | grep -v '^\s*#' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     local total=${#domains[@]}
 
     if [[ "$total" -eq 0 ]]; then
-        die "No domains found in ${input_file}"
+        die "No domains found in domains.txt"
     fi
 
     echo -e "Domains: ${CYAN}${total}${NC}"
     echo -e "NS1:     ${CYAN}${NS1}${NC}"
     echo -e "NS2:     ${CYAN}${NS2}${NC}"
     echo -e "Delay:   ${CYAN}${DELAY}s${NC}"
-    echo -e "Log:     ${CYAN}${LOG_FILE}${NC}"
     echo ""
 
     log "=== Spaceship Bulk NS Change v${VERSION} ==="
-    log "Domains: ${total} | NS: ${NS1}, ${NS2} | Delay: ${DELAY}s"
+    log "Server: $(hostname) | Domains: ${total} | NS: ${NS1}, ${NS2} | Delay: ${DELAY}s"
 
     local success=0
     local failed=0
@@ -209,7 +242,6 @@ main() {
                     ((retry++))
                     ;;
                 *)
-                    # Parse error message from JSON body if possible
                     local err_msg
                     err_msg=$(echo "$body" | jq -r '.detail // .message // .title // empty' 2>/dev/null || echo "$body")
                     [[ -z "$err_msg" ]] && err_msg="HTTP ${code}"
@@ -259,7 +291,7 @@ main() {
 
     send_telegram "$tg_msg"
 
-    echo -e "\n${GREEN}Done!${NC} Log: ${LOG_FILE}"
+    echo -e "\n${GREEN}Done!${NC} (temp files cleaned automatically)"
 }
 
 main "$@"
